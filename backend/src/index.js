@@ -1,0 +1,56 @@
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import rateLimit from 'express-rate-limit';
+
+import authRoutes from './routes/auth.routes.js';
+import rbacRoutes from './routes/rbac.routes.js';
+import requestRoutes from './routes/Request.routes.js';
+import alertsRoutes from './routes/alerts.routes.js';
+import accessRequestsMeRoutes from './routes/accessRequestsMe.routes.js';
+
+dotenv.config();
+
+const app = express();
+
+// Restrict CORS to our actual frontend origin instead of allowing any origin.
+app.use(
+  cors({
+    origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
+  })
+);
+app.use(express.json());
+
+// 5 attempts per minute per IP on the login endpoint, to slow down credential
+// stuffing / brute-force attempts. This counts every request (successful or
+// failed) toward the limit — good enough for this basic protection.
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: 5,
+  standardHeaders: true, // return RateLimit-* headers
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again in a minute.' },
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.use('/api/auth/login', loginLimiter);
+app.use('/api/auth', authRoutes);
+app.use('/api/admin', rbacRoutes);
+app.use('/api/admin', alertsRoutes);
+
+// Access requests and audit log routes
+app.use('/api', requestRoutes);
+
+// GET /api/access-requests/me — the logged-in user's own access requests.
+// Deliberately its own router/mount (see routes/accessRequestsMe.routes.js)
+// rather than folded into requestRoutes above, which is owned by Backend Dev 2.
+app.use('/api/access-requests', accessRequestsMeRoutes);
+
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`AccessOS backend running on port ${PORT}`);
+});
