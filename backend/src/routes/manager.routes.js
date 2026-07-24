@@ -159,4 +159,76 @@ router.put('/access-requests/:id', requireAuth, requireRole('manager'), async (r
   }
 });
 
+// GET /manager/overview
+// Response: { totalEmployees, presentToday, onLeaveToday, pendingTasks }
+//
+// onLeaveToday and pendingTasks depend on tables owned by Backend Dev 1
+// (leave_requests) and Backend Dev 2 (tasks) respectively. Those tables may
+// not exist yet (parallel work), so each sub-query is isolated in its own
+// try/catch: if the table is missing (Postgres error code 42P01 —
+// undefined_table) we don't want to fail the whole endpoint, we just report
+// that stat as unavailable (null). Any other kind of error is rethrown to
+// the outer catch, since that would be a real bug rather than a
+// coordination race.
+router.get('/overview', requireAuth, requireRole('manager'), async (req, res) => {
+  try {
+    const { rows: totalRows } = await pool.query(
+      `SELECT COUNT(*)::int AS count FROM users WHERE manager_id = $1`,
+      [req.user.id]
+    );
+    const totalEmployees = totalRows[0].count;
+
+    let onLeaveToday = null;
+    try {
+      const { rows } = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM leave_requests
+         WHERE manager_id = $1
+           AND status = 'APPROVED'
+           AND $2::date BETWEEN start_date AND end_date`,
+        [req.user.id, new Date()]
+      );
+      onLeaveToday = rows[0].count;
+    } catch (err) {
+      if (err.code === '42P01') {
+        // leave_requests doesn't exist yet — Backend Dev 1's table isn't
+        // merged. Stub with null rather than blocking this endpoint.
+        onLeaveToday = null;
+      } else {
+        throw err;
+      }
+    }
+
+    // presentToday is a simple derived approximation (totalEmployees minus
+    // employees on approved leave today) — there's no real attendance/
+    // check-in system to source this from. If onLeaveToday couldn't be
+    // computed (table not ready), presentToday can't be derived either.
+    const presentToday = onLeaveToday === null ? null : totalEmployees - onLeaveToday;
+
+    let pendingTasks = null;
+    try {
+      const { rows } = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM tasks
+         WHERE assigned_by = $1
+           AND status != 'done'`,
+        [req.user.id]
+      );
+      pendingTasks = rows[0].count;
+    } catch (err) {
+      if (err.code === '42P01') {
+        // tasks doesn't exist yet — Backend Dev 2's table isn't merged.
+        pendingTasks = null;
+      } else {
+        throw err;
+      }
+    }
+
+    res.json({ totalEmployees, presentToday, onLeaveToday, pendingTasks });
+  } catch (err) {
+    console.error('Error fetching manager overview:', err);
+    res.status(500).json({ error: 'Failed to fetch overview' });
+  }
+});
+
 export default router;
