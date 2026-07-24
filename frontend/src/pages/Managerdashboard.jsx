@@ -24,6 +24,8 @@ import {
   getManagerOverview,
   getManagerLeaveRequests,
   decideLeaveRequest,
+  getManagerTasks,
+  assignTask,
 } from '../api/client.js';
 
 const REQUIRED_ROLE = 'manager';
@@ -33,6 +35,18 @@ const REQUIRED_ROLE = 'manager';
 function formatDateOnly(iso) {
   if (!iso) return '—';
   return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
+}
+
+// todo -> in_progress -> done, same style as LEAVE_STATUS_LABELS on
+// Dashboard.jsx.
+const TASK_STATUS_LABELS = {
+  todo: { label: 'To do', tone: 'slate' },
+  in_progress: { label: 'In progress', tone: 'amber' },
+  done: { label: 'Done', tone: 'green' },
+};
+
+function taskStatusInfo(status) {
+  return TASK_STATUS_LABELS[status] ?? { label: status, tone: 'slate' };
 }
 
 function formatDate(iso) {
@@ -486,6 +500,227 @@ function LeaveHistory({ requests, status }) {
   );
 }
 
+// --- Assign Task modal ---------------------------------------------------
+
+function TaskAssignModal({ team, teamStatus, onClose, onSubmit, submitting }) {
+  const [assignedTo, setAssignedTo] = useState('');
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [error, setError] = useState('');
+
+  // team loads asynchronously (same "My Team" data as the section above),
+  // so default the selection once it arrives instead of only on mount —
+  // same pattern Dashboard.jsx's RequestAccessModal uses for roles.
+  useEffect(() => {
+    if (teamStatus === 'ready' && team?.length > 0 && !assignedTo) {
+      setAssignedTo(team[0].id);
+    }
+  }, [teamStatus, team, assignedTo]);
+
+  const canSubmit = teamStatus === 'ready' && (team ?? []).length > 0;
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!assignedTo || !title.trim()) {
+      setError('Assignee and title are both required.');
+      return;
+    }
+    setError('');
+    onSubmit({
+      assignedTo,
+      title: title.trim(),
+      description: description.trim() || null,
+      dueDate: dueDate || null,
+    });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-800">Assign Task</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+            aria-label="Close"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
+              <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          {error && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+          )}
+
+          {teamStatus === 'loading' && (
+            <div className="flex items-center gap-2 text-sm text-slate-500">
+              <span
+                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600"
+                aria-hidden="true"
+              />
+              Loading your team…
+            </div>
+          )}
+
+          {teamStatus === 'error' && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+              Could not load your team. Please try again.
+            </p>
+          )}
+
+          {teamStatus === 'ready' && (team ?? []).length === 0 && (
+            <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-500">
+              No one reports to you yet, so there's no one to assign a task to.
+            </p>
+          )}
+
+          {teamStatus === 'ready' && (team ?? []).length > 0 && (
+            <div>
+              <label htmlFor="assignedTo" className="block text-sm font-medium text-slate-700">
+                Assign to
+              </label>
+              <select
+                id="assignedTo"
+                value={assignedTo}
+                onChange={(e) => setAssignedTo(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+              >
+                {team.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {member.name} — {member.email}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div>
+            <label htmlFor="title" className="block text-sm font-medium text-slate-700">
+              Title
+            </label>
+            <input
+              id="title"
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Finish Q3 report"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="description" className="block text-sm font-medium text-slate-700">
+              Description (optional)
+            </label>
+            <textarea
+              id="description"
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="dueDate" className="block text-sm font-medium text-slate-700">
+              Due date (optional)
+            </label>
+            <input
+              id="dueDate"
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !canSubmit}
+              className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {submitting ? 'Assigning…' : 'Assign Task'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// --- Task list (assigned by this manager) -------------------------------
+
+function ManagerTasksList({ tasks, status, onAssignClick }) {
+  const colSpan = 4;
+
+  return (
+    <SectionCard
+      title="Tasks"
+      subtitle="Tasks you've assigned to your team."
+      action={
+        <button
+          type="button"
+          onClick={onAssignClick}
+          className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-900"
+        >
+          Assign Task
+        </button>
+      }
+    >
+      <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Title</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Assignee</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Status</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Due date</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 bg-white">
+          {status === 'loading' && <LoadingRow colSpan={colSpan} />}
+          {status === 'error' && <ErrorRow colSpan={colSpan} message="Couldn't load tasks." />}
+          {status === 'ready' && (tasks ?? []).length === 0 && (
+            <EmptyRow colSpan={colSpan} message="You haven't assigned any tasks yet." />
+          )}
+          {status === 'ready' &&
+            (tasks ?? []).map((task) => {
+              const { label, tone } = taskStatusInfo(task.status);
+              return (
+                <tr key={task.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-3 font-medium text-slate-800">{task.title}</td>
+                  <td className="px-4 py-3 text-slate-500">{task.assignedTo?.name}</td>
+                  <td className="px-4 py-3">
+                    <StatusPill tone={tone}>{label}</StatusPill>
+                  </td>
+                  <td className="px-4 py-3 text-slate-500">{formatDateOnly(task.dueDate)}</td>
+                </tr>
+              );
+            })}
+        </tbody>
+      </table>
+    </SectionCard>
+  );
+}
+
 // --- Body ---------------------------------------------------------------
 
 function ManagerDashboardBody() {
@@ -495,6 +730,24 @@ function ManagerDashboardBody() {
   const [leaveRequests, leaveRequestsStatus, refetchLeaveRequests] = useAsync(
     getManagerLeaveRequests
   );
+  const [tasks, tasksStatus, refetchTasks] = useAsync(getManagerTasks);
+  const [taskModalOpen, setTaskModalOpen] = useState(false);
+  const [assigningTask, setAssigningTask] = useState(false);
+  const [taskError, setTaskError] = useState('');
+
+  async function handleAssignTask(payload) {
+    setAssigningTask(true);
+    setTaskError('');
+    try {
+      await assignTask(payload);
+      setTaskModalOpen(false);
+      refetchTasks();
+    } catch (err) {
+      setTaskError("Couldn't assign this task. Please try again.");
+    } finally {
+      setAssigningTask(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -530,6 +783,27 @@ function ManagerDashboardBody() {
         onDecided={refetchLeaveRequests}
       />
       <LeaveHistory requests={leaveRequests} status={leaveRequestsStatus} />
+      <ManagerTasksList
+        tasks={tasks}
+        status={tasksStatus}
+        onAssignClick={() => setTaskModalOpen(true)}
+      />
+
+      {taskModalOpen && (
+        <TaskAssignModal
+          team={team}
+          teamStatus={teamStatus}
+          onClose={() => setTaskModalOpen(false)}
+          onSubmit={handleAssignTask}
+          submitting={assigningTask}
+        />
+      )}
+
+      {taskError && (
+        <p className="text-sm text-rose-500" role="alert">
+          {taskError}
+        </p>
+      )}
     </div>
   );
 }
