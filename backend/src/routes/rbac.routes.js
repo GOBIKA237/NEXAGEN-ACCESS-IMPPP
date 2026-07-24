@@ -33,6 +33,64 @@ router.get('/users', requireAuth, checkPermission('manage_users'), async (req, r
   res.json(rows);
 });
 
+// GET /users/export.csv — same query as GET /users above, formatted as CSV.
+//
+// Escaping note: the ticket's draft wrapped every field in literal quotes
+// without escaping embedded quote characters, e.g. `"${row.name}"`. A name
+// like `Robert "Bob" Chen` would break the column boundaries for every
+// field after it in that row. CSV requires doubling any `"` inside a
+// quoted field (RFC 4180), so that's done below via escapeCsvField().
+//
+// escapeCsvField() also guards against CSV/formula injection: if a field's
+// first character is one Excel/Sheets treats as a formula prefix
+// (=, +, -, @, or tab/CR), a leading apostrophe is prepended so the
+// spreadsheet app renders it as text instead of executing it. This matters
+// here because `name` and `email` are user-supplied at registration.
+function escapeCsvField(value) {
+  const str = String(value ?? '');
+  const needsFormulaGuard = /^[=+\-@\t\r]/.test(str);
+  const guarded = needsFormulaGuard ? `'${str}` : str;
+  return `"${guarded.replace(/"/g, '""')}"`;
+}
+
+router.get('/users/export.csv', requireAuth, checkPermission('manage_users'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.name, u.email,
+            COALESCE(
+              json_agg(r.name) FILTER (WHERE r.name IS NOT NULL),
+              '[]'
+            ) AS roles
+     FROM users u
+     LEFT JOIN user_roles ur ON ur.user_id = u.id
+     LEFT JOIN roles r ON r.id = ur.role_id
+     GROUP BY u.id
+     ORDER BY u.id`
+  );
+
+  const csvLines = ['name,email,roles'];
+  for (const row of rows) {
+    // Multiple roles joined with ';' so the roles column stays a single
+    // CSV field (a bare comma-join would silently create extra columns).
+    csvLines.push(
+      [row.name, row.email, row.roles.join(';')].map(escapeCsvField).join(',')
+    );
+  }
+
+  // CLAUDE.md: "Every permission check and admin action gets written to
+  // audit_logs." No single target user here (this is a bulk export), so
+  // this follows the target-user-less pattern used elsewhere (finance.routes.js,
+  // hr.routes.js) rather than the actor/target pattern.
+  await pool.query(
+    `INSERT INTO audit_logs (user_id, action, resource, ip_address)
+     VALUES ($1, $2, $3, $4)`,
+    [req.user.id, 'USERS_EXPORTED', `${rows.length} user(s) exported to CSV`, req.ip]
+  );
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="users.csv"');
+  res.send(csvLines.join('\n'));
+});
+
 router.get('/roles', requireAuth, checkPermission('manage_users'), async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM roles');
   res.json(rows);
