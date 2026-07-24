@@ -7,6 +7,8 @@ import {
   getMyAccessRequests,
   submitLeaveRequest,
   getMyLeaveRequests,
+  getMyTasks,
+  updateTaskStatus,
 } from '../api/client.js';
 import Header from '../components/Header.jsx';
 
@@ -101,6 +103,26 @@ const LEAVE_STATUS_LABELS = {
 function leaveStatusInfo(status) {
   return LEAVE_STATUS_LABELS[status] ?? { label: status, tone: 'slate' };
 }
+
+// todo -> in_progress -> done, same shape as manager-side
+// TASK_STATUS_LABELS on Managerdashboard.jsx.
+const TASK_STATUS_LABELS = {
+  todo: { label: 'To do', tone: 'slate' },
+  in_progress: { label: 'In progress', tone: 'amber' },
+  done: { label: 'Done', tone: 'green' },
+};
+
+function taskStatusInfo(status) {
+  return TASK_STATUS_LABELS[status] ?? { label: status, tone: 'slate' };
+}
+
+// The only forward transition each status can take — done is terminal, so
+// it has none. Used to render a single "move it forward" button rather
+// than a full dropdown, since the task only ever moves one direction.
+const NEXT_TASK_STATUS = {
+  todo: { value: 'in_progress', label: 'Start' },
+  in_progress: { value: 'done', label: 'Mark done' },
+};
 
 function formatDateOnly(iso) {
   if (!iso) return '—';
@@ -599,6 +621,9 @@ export default function Dashboard() {
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
   const [myLeaveRequests, setMyLeaveRequests] = useState([]);
   const [myLeaveRequestsStatus, setMyLeaveRequestsStatus] = useState('idle'); // idle | loading | ready | error
+  const [myTasks, setMyTasks] = useState([]);
+  const [myTasksStatus, setMyTasksStatus] = useState('idle'); // idle | loading | ready | error
+  const [taskUpdating, setTaskUpdating] = useState({}); // id -> true while a status update is in flight
 
   // Pulls the latest roles/permissions from the server and writes them
   // back into sessionStorage + state. Called on mount and from the manual
@@ -726,6 +751,32 @@ export default function Dashboard() {
     };
   }, [checkedStorage]);
 
+  // Loads the current user's own assigned tasks for the "My Tasks"
+  // section. Separate effect, same reasoning as the leave/access requests
+  // effects above: a failure here shouldn't block the rest of the page.
+  useEffect(() => {
+    if (!checkedStorage) return;
+
+    let cancelled = false;
+    setMyTasksStatus('loading');
+
+    getMyTasks()
+      .then((data) => {
+        if (cancelled) return;
+        setMyTasks(data);
+        setMyTasksStatus('ready');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('Failed to load my tasks:', err);
+        setMyTasksStatus('error');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [checkedStorage]);
+
   const openRequestModal = async () => {
     setModalOpen(true);
     setRolesStatus('loading');
@@ -791,6 +842,25 @@ export default function Dashboard() {
       setToast({ type: 'error', message });
     } finally {
       setLeaveSubmitting(false);
+    }
+  };
+
+  const handleTaskStatusUpdate = async (taskId, nextStatus) => {
+    setTaskUpdating((prev) => ({ ...prev, [taskId]: true }));
+
+    try {
+      const updated = await updateTaskStatus(taskId, nextStatus);
+      setMyTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, ...updated, status: nextStatus } : t))
+      );
+    } catch (err) {
+      console.error('Failed to update task status:', err);
+      setToast({
+        type: 'error',
+        message: "Couldn't update this task. Please try again.",
+      });
+    } finally {
+      setTaskUpdating((prev) => ({ ...prev, [taskId]: false }));
     }
   };
 
@@ -903,6 +973,80 @@ export default function Dashboard() {
                 </span>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* My Tasks — wired up against GET /tasks/me and PUT /tasks/:id/status. */}
+        <div className="mt-8 rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex items-center justify-between p-5 pb-0">
+            <h2 className="font-semibold text-slate-800">My Tasks</h2>
+          </div>
+
+          <div className="mt-4 overflow-x-auto">
+            {myTasksStatus === 'loading' && (
+              <p className="px-5 pb-5 text-sm text-slate-400">Loading your tasks…</p>
+            )}
+
+            {myTasksStatus === 'error' && (
+              <p className="px-5 pb-5 text-sm text-rose-500">
+                Couldn't load your tasks. Please try again later.
+              </p>
+            )}
+
+            {myTasksStatus === 'ready' && myTasks.length === 0 && (
+              <p className="px-5 pb-5 text-sm text-slate-400">
+                No tasks assigned to you yet.
+              </p>
+            )}
+
+            {myTasksStatus === 'ready' && myTasks.length > 0 && (
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Title</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Description</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Due date</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Status</th>
+                    <th className="px-5 py-3 text-right font-medium text-slate-500">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {myTasks.map((task) => {
+                    const { label, tone } = taskStatusInfo(task.status);
+                    const next = NEXT_TASK_STATUS[task.status];
+                    const isBusy = !!taskUpdating[task.id];
+                    return (
+                      <tr key={task.id}>
+                        <td className="px-5 py-3 font-medium text-slate-800">{task.title}</td>
+                        <td className="px-5 py-3 text-slate-600">{task.description || '—'}</td>
+                        <td className="px-5 py-3 text-slate-500">{formatDateOnly(task.dueDate)}</td>
+                        <td className="px-5 py-3">
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_PILL_TONES[tone]}`}
+                          >
+                            {label}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-right">
+                          {next ? (
+                            <button
+                              type="button"
+                              onClick={() => handleTaskStatusUpdate(task.id, next.value)}
+                              disabled={isBusy}
+                              className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {isBusy ? 'Updating…' : next.label}
+                            </button>
+                          ) : (
+                            <span className="text-xs italic text-slate-400">Complete</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
 
