@@ -13,7 +13,23 @@ const router = Router();
 const CONFLICT_WATCHLIST_PERMISSIONS = ['manage_users'];
 
 router.get('/users', requireAuth, checkPermission('manage_users'), async (req, res) => {
-  const { rows } = await pool.query('SELECT id, name, email FROM users');
+  // Same json_agg + LEFT JOIN pattern as GET /roles/predefined below.
+  // docs/api-contract.md and the frontend's userRoleNames() (AdminDashboard.jsx)
+  // both expect `roles` as an array of role name strings — not role objects,
+  // and not omitted for users with zero roles (COALESCE gives them `[]`
+  // instead of NULL from json_agg over an empty LEFT JOIN).
+  const { rows } = await pool.query(
+    `SELECT u.id, u.name, u.email,
+            COALESCE(
+              json_agg(r.name) FILTER (WHERE r.name IS NOT NULL),
+              '[]'
+            ) AS roles
+     FROM users u
+     LEFT JOIN user_roles ur ON ur.user_id = u.id
+     LEFT JOIN roles r ON r.id = ur.role_id
+     GROUP BY u.id
+     ORDER BY u.id`
+  );
   res.json(rows);
 });
 
@@ -116,6 +132,96 @@ router.put('/users/:id/roles', requireAuth, checkPermission('manage_users'), asy
   );
 
   res.json({ id: Number(id), roles: rows });
+});
+
+// PUT /users/:id/manager — body { managerId }
+//
+// Fills the gap flagged in Request.routes.js ("ADMIN VISIBILITY" / "no way
+// to assign a manager"): users.manager_id is NULL after registration, so
+// every access request lands at PENDING_MANAGER and just sits there unless
+// an admin skip-levels it via PUT /admin/access-requests/:id. This route
+// lets an admin actually set it.
+//
+// managerId must belong to a user who currently holds the 'manager' role
+// (user_roles -> roles, same active/expiry check checkPermission.js and
+// requireRole() use elsewhere) — otherwise 400. This is deliberately a
+// role-membership check, not a permission check: 'manager' isn't wired to
+// any entry in role_permissions (see requireRole()'s comment in
+// checkPermission.js), so checkPermission('manager') wouldn't work here.
+router.put('/users/:id/manager', requireAuth, checkPermission('manage_users'), async (req, res) => {
+  const { id } = req.params;
+  const { managerId } = req.body;
+
+  if (!managerId) {
+    return res.status(400).json({ error: 'managerId is required' });
+  }
+
+  if (Number(managerId) === Number(id)) {
+    return res.status(400).json({ error: 'A user cannot be their own manager' });
+  }
+
+  const { rows: managerRoleRows } = await pool.query(
+    `SELECT 1
+     FROM user_roles ur
+     JOIN roles r ON r.id = ur.role_id
+     WHERE ur.user_id = $1 AND r.name = 'manager'
+       AND (ur.expires_at IS NULL OR ur.expires_at > NOW())
+     LIMIT 1`,
+    [managerId]
+  );
+
+  if (managerRoleRows.length === 0) {
+    return res.status(400).json({ error: 'managerId must belong to a user holding the manager role' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `UPDATE users
+       SET manager_id = $1
+       WHERE id = $2
+       RETURNING id, name, email, department, status, manager_id`,
+      [managerId, id]
+    );
+
+    if (rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Human-readable resource string for the audit log, same pattern as
+    // Request.routes.js / manager.routes.js (pull the counterpart's name
+    // rather than logging a bare id).
+    const { rows: managerNameRows } = await client.query('SELECT name FROM users WHERE id = $1', [managerId]);
+    const managerName = managerNameRows[0]?.name ?? `user:${managerId}`;
+
+    // CLAUDE.md: "Every permission check and admin action gets written to
+    // audit_logs." user_id is the actor (the admin making the call);
+    // target_user_id is the user whose manager changed — same
+    // actor/target split GET /admin/audit-logs already expects.
+    await client.query(
+      `INSERT INTO audit_logs (user_id, target_user_id, action, resource, ip_address)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.user.id,
+        id,
+        'MANAGER_ASSIGNED',
+        `user:${id} — manager set to ${managerName} (user:${managerId})`,
+        req.ip,
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('PUT /users/:id/manager error', err);
+    res.status(500).json({ error: 'Internal error assigning manager' });
+  } finally {
+    client.release();
+  }
 });
 
 // POST /roles — body { name, description }

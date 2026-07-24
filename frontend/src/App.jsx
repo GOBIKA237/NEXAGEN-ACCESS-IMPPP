@@ -2,9 +2,9 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import AdminDashboard from './pages/AdminDashboard.jsx';
-import FinanceDashboard from './pages/FinanceDashboard.jsx';
-import HRDashboard from './pages/HRDashboard.jsx';
-import ManagerDashboard from './pages/ManagerDashboard.jsx';
+import FinanceDashboard from './pages/Financedashboard.jsx';
+import HRDashboard from './pages/Hrdashboard.jsx';
+import ManagerDashboard from './pages/Managerdashboard.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 
 // Frontend Dev 1 owns Login.jsx + Dashboard.jsx

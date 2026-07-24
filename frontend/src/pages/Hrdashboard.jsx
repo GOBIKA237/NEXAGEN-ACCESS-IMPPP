@@ -146,7 +146,7 @@ function OnboardEmployeeModal({ onClose, onCreated }) {
       onClose();
     } catch (err) {
       setError(
-        err.response?.data?.message || "Couldn't create this employee. Check the details and try again."
+        err.response?.data?.error || "Couldn't create this employee. Check the details and try again."
       );
     } finally {
       setSaving(false);

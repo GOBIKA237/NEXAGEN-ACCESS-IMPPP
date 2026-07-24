@@ -164,8 +164,8 @@ function budgetDerived(b) {
   return { allocated, spent, remaining, utilization };
 }
 
-function BudgetOverview() {
-  const [budgets, status] = useAsync(getBudgets);
+function BudgetOverview({ refreshToken }) {
+  const [budgets, status] = useAsync(getBudgets, [refreshToken]);
   const colSpan = 5;
 
   return (
@@ -253,7 +253,7 @@ function SubmitExpenseModal({ categories, onClose, onCreated }) {
       onClose();
     } catch (err) {
       setError(
-        err.response?.data?.message || "Couldn't submit this expense. Check the details and try again."
+        err.response?.data?.error || "Couldn't submit this expense. Check the details and try again."
       );
     } finally {
       setSaving(false);
@@ -336,7 +336,7 @@ function SubmitExpenseModal({ categories, onClose, onCreated }) {
 
 // --- Expense list ---------------------------------------------------------
 
-function ExpenseList({ budgetCategories }) {
+function ExpenseList({ budgetCategories, onDecided }) {
   const [expenses, status, refetch] = useAsync(getExpenses);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [pending, setPending] = useState({});
@@ -350,6 +350,12 @@ function ExpenseList({ budgetCategories }) {
     try {
       await setExpenseStatus(expenseId, decision);
       refetch();
+      // Approving an expense also updates budgets.spent server-side (see
+      // finance.routes.js) — without this, Budget Overview and Reports
+      // silently go stale after every approval until a manual page
+      // reload. Found during this round's "does the reports view update
+      // after an approval" check — it didn't, until this.
+      onDecided?.();
     } catch (err) {
       setRowError((prev) => ({
         ...prev,
@@ -469,8 +475,8 @@ function StatBlock({ label, value }) {
   );
 }
 
-function Reports() {
-  const [reports, status] = useAsync(getFinanceReports);
+function Reports({ refreshToken }) {
+  const [reports, status] = useAsync(getFinanceReports, [refreshToken]);
 
   if (status === 'loading') {
     return (
@@ -548,11 +554,16 @@ function Reports() {
 // --- Page shell -------------------------------------------------------------
 
 function FinanceDashboardBody() {
+  // Bumped whenever an expense is approved/rejected, so BudgetOverview and
+  // Reports refetch alongside ExpenseList instead of showing stale
+  // numbers until a manual page reload — see ExpenseList's onDecided.
+  const [refreshToken, setRefreshToken] = useState(0);
+
   // Budgets are fetched here too (separately from BudgetOverview's own
   // fetch) purely to get the list of known categories for the expense
   // submission form's dropdown — a little duplicate-fetching for a much
   // simpler prop story than lifting BudgetOverview's whole state up.
-  const [budgets] = useAsync(getBudgets);
+  const [budgets] = useAsync(getBudgets, [refreshToken]);
   const categories = useMemo(
     () => Array.from(new Set((budgets ?? []).map((b) => b.category).filter(Boolean))),
     [budgets]
@@ -560,9 +571,12 @@ function FinanceDashboardBody() {
 
   return (
     <div className="space-y-6">
-      <BudgetOverview />
-      <ExpenseList budgetCategories={categories} />
-      <Reports />
+      <BudgetOverview refreshToken={refreshToken} />
+      <ExpenseList
+        budgetCategories={categories}
+        onDecided={() => setRefreshToken((t) => t + 1)}
+      />
+      <Reports refreshToken={refreshToken} />
     </div>
   );
 }

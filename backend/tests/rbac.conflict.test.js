@@ -17,6 +17,12 @@ test('PUT /users/:id/roles returns 409 with conflict details when 2+ assigned ro
   t.mock.method(pool, 'query', async (sql) => {
     const text = typeof sql === 'string' ? sql : sql.text;
 
+    // requireAuth's tokens_invalid_before lookup (middleware/auth.js) — runs
+    // before checkPermission on every authenticated route. Caller has never
+    // had a forced session invalidation, so this comes back NULL.
+    if (text.includes('SELECT tokens_invalid_before FROM users')) {
+      return { rows: [{ tokens_invalid_before: null }] };
+    }
     // checkPermission('manage_users') looking up the caller's own permissions
     if (text.includes('FROM user_roles ur') && text.includes('role_permissions rp')) {
       return { rows: [{ '?column?': 1 }] }; // caller is allowed

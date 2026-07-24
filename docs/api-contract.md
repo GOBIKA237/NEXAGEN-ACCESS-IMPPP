@@ -26,6 +26,20 @@ Response 200: `[{ id, name, email, roles: [...] }]`
 Request: `{ roleIds: [1,2] }`
 Response 200: `{ id, roles: [...] }`
 
+### PUT /admin/users/:id/manager
+Request: `{ managerId }`
+Response 200: `{ id, name, email, department, status, manager_id }`
+Response 400: `{ error: "managerId is required" }` |
+  `{ error: "A user cannot be their own manager" }` |
+  `{ error: "managerId must belong to a user holding the manager role" }`
+Response 404: `{ error: "User not found" }`
+`managerId` must belong to a user currently holding the `manager` role
+(active `user_roles` row, not expired) or the request is rejected — see
+rbac.routes.js. Fills the gap noted in Request.routes.js: without this,
+`users.manager_id` stays NULL after registration and every access request
+sits at `PENDING_MANAGER` forever unless an admin skip-levels it via PUT
+`/admin/access-requests/:id`.
+
 ### GET /admin/roles
 ### POST /admin/roles          Request: `{ name, description }`
 ### PUT /admin/roles/:id       Request: `{ name?, description?, permissionIds? }`

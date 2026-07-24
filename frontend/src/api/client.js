@@ -126,14 +126,19 @@ export async function getAvailableRoles() {
 // ACCESS REQUESTS
 // =========================
 
+// Admin's pending queue. access_requests.status is a case-sensitive enum
+// (PENDING_MANAGER | PENDING_ADMIN | APPROVED | REJECTED | REVOKED — see
+// docs/schema.sql). `status=PENDING` is a backend alias covering BOTH
+// non-terminal stages (PENDING_MANAGER and PENDING_ADMIN) — see
+// Request.routes.js. Admin can act on a request at either stage: there's
+// currently no way to assign a manager to a user, so most requests would
+// otherwise never leave PENDING_MANAGER and would never show up here.
 export async function getAccessRequests() {
   if (USE_MOCK) {
     return mock.mockAccessRequests;
   }
 
-  const { data } = await api.get(
-    '/admin/access-requests?status=pending'
-  );
+  const { data } = await api.get('/admin/access-requests?status=PENDING');
 
   return data;
 }
@@ -142,16 +147,22 @@ export async function getAccessRequests() {
 // REQUEST ACCESS (user-facing)
 // =========================
 
-export async function requestAccess(roleId) {
+// durationHours: 4 | 24 | 168 | null (null = permanent). Optional — Request
+// routes.js already treats undefined/null identically, both mean
+// permanent, so it's safe to always send the key rather than conditionally
+// including it.
+export async function requestAccess(roleId, durationHours = null) {
   if (USE_MOCK) {
     return {
       id: Date.now(),
       status: 'pending',
+      durationHours,
     };
   }
 
   const { data } = await api.post('/access-requests', {
     requestedRoleId: roleId,
+    durationHours,
   });
 
   return data;
@@ -251,6 +262,44 @@ export async function denyRequest(id) {
       status: 'denied',
     }
   );
+
+  return data;
+}
+
+// =========================
+// REVOKE ACCESS REQUEST EARLY
+// =========================
+
+export async function revokeRequest(id) {
+  if (USE_MOCK) {
+    return {
+      id,
+      status: 'REVOKED',
+    };
+  }
+
+  const { data } = await api.post(`/admin/access-requests/${id}/revoke`);
+
+  return data;
+}
+
+// =========================
+// INVALIDATE SESSION (from an alert row)
+// =========================
+
+// :id is the login_events row (the alert itself), not a user id — see
+// backend/src/routes/alerts.routes.js. Forces every token that user
+// currently holds to stop working; there's nothing to reflect locally
+// afterward (no session list to update), the caller just needs to know
+// it succeeded.
+export async function invalidateSession(id) {
+  if (USE_MOCK) {
+    return {
+      message: 'Session invalidated. The user will need to log in again.',
+    };
+  }
+
+  const { data } = await api.post(`/admin/alerts/${id}/invalidate-session`);
 
   return data;
 }

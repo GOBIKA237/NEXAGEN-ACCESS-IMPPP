@@ -12,6 +12,8 @@ import {
   getAlerts,
   approveRequest,
   denyRequest,
+  revokeRequest,
+  invalidateSession,
 } from '../api/client.js';
 
 // --- Roles / permissions / user-role-assignment API calls ----------------
@@ -37,11 +39,10 @@ async function deleteRole(id) {
   await api.delete(`/admin/roles/${id}`);
 }
 
-// `confirm: true` is this frontend's assumption for how to re-submit after
-// a 409 conflict — the backend's PUT /users/:id/roles doesn't currently
-// read any such flag (it always re-runs the same overlap check), so a
-// confirmed retry will 409 again until Backend Dev 2 adds a bypass. Flagged
-// in the PR description; see chat writeup.
+// `confirm: true` on a retry after a 409 conflict skips the overlap check
+// server-side (see PUT /users/:id/roles in rbac.routes.js) and applies the
+// roles anyway. Verified working end-to-end as of Backend Dev 2's latest
+// changes — a confirmed retry now returns 200 instead of 409 again.
 async function updateUserRoles(id, roleIds, { confirm } = {}) {
   const { data } = await api.put(`/admin/users/${id}/roles`, {
     roleIds,
@@ -64,6 +65,61 @@ function formatDate(iso) {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
+}
+
+// Matches the "impossible travel: CityA → CityB at Xkm/h" reason string
+// documented for GET /admin/alerts. Tolerant of "->" as a fallback in case
+// the arrow character doesn't round-trip through some client somewhere.
+const IMPOSSIBLE_TRAVEL_RE =
+  /impossible travel:\s*(.+?)\s*(?:→|->)\s*(.+?)\s+at\s+([\d.,]+)\s*km\/h/i;
+
+function parseImpossibleTravel(reason) {
+  if (!reason) return null;
+  const match = reason.match(IMPOSSIBLE_TRAVEL_RE);
+  if (!match) return null;
+  return { from: match[1].trim(), to: match[2].trim(), speedKmh: match[3].trim() };
+}
+
+function PlaneIcon({ className = 'h-3.5 w-3.5' }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M21 16v-2l-8-5V4.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2.5 1.5V22l4-1 4 1v-1.5L13 19v-5.5l8 2.5z" />
+    </svg>
+  );
+}
+
+// durationHours is the requester's *ask* (set at submission, see
+// Request.routes.js POST /access-requests) — distinct from expiresAt, which
+// only gets stamped once an admin actually approves. A pending request can
+// have durationHours set and still have expiresAt = null; this formats that
+// still-pending ask so the table doesn't show "Permanent" for a request
+// that's actually temporary, just not decided yet.
+function formatRequestedDuration(durationHours) {
+  if (!durationHours) return null;
+  if (durationHours % 24 === 0) {
+    const days = durationHours / 24;
+    return `${days} day${days === 1 ? '' : 's'}`;
+  }
+  return `${durationHours} hour${durationHours === 1 ? '' : 's'}`;
+}
+
+// expiresAt comes back per-row on GET /admin/access-requests / granted
+// roles; null/undefined means the grant doesn't expire.
+function formatExpiry(expiresAt) {
+  if (!expiresAt) return null;
+  const diffMs = new Date(expiresAt).getTime() - Date.now();
+  if (diffMs <= 0) return 'Expired';
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (days >= 1) return `in ${days}d`;
+  const hours = Math.floor(diffMs / (1000 * 60 * 60));
+  if (hours >= 1) return `in ${hours}h`;
+  const mins = Math.max(1, Math.floor(diffMs / (1000 * 60)));
+  return `in ${mins}m`;
 }
 
 function StatusPill({ children, tone = 'slate' }) {
@@ -178,11 +234,17 @@ function AlertBanner() {
       <ul className="divide-y divide-amber-100">
         {visible.map((alert) => {
           const high = alert.riskScore > 50;
+          const route = parseImpossibleTravel(alert.reason);
+          const isImpossibleTravel = !!route;
           return (
             <li
               key={alert.id}
               className={`flex items-center justify-between gap-4 px-6 py-2.5 text-sm ${
-                high ? 'bg-rose-50' : 'bg-amber-50'
+                isImpossibleTravel
+                  ? 'border-l-4 border-rose-500 bg-rose-50 pl-5'
+                  : high
+                  ? 'bg-rose-50'
+                  : 'bg-amber-50'
               }`}
             >
               <div className="flex min-w-0 items-center gap-3">
@@ -194,9 +256,19 @@ function AlertBanner() {
                 >
                   !
                 </span>
-                <span className={`truncate ${high ? 'text-rose-800' : 'text-amber-800'}`}>
-                  {alert.reason}
-                </span>
+                <div className="min-w-0">
+                  <span className={`truncate ${high ? 'text-rose-800' : 'text-amber-800'}`}>
+                    {alert.reason}
+                  </span>
+                  {isImpossibleTravel && (
+                    <div className="mt-0.5 flex items-center gap-1 text-xs font-semibold text-rose-700">
+                      <PlaneIcon className="h-3 w-3" />
+                      <span>
+                        {route.from} → {route.to}
+                      </span>
+                    </div>
+                  )}
+                </div>
                 <StatusPill tone={high ? 'red' : 'amber'}>
                   Risk {alert.riskScore}
                 </StatusPill>
@@ -256,12 +328,36 @@ function useTabData(fetcher, deps = []) {
 // the banner or wants the full history rather than just what's currently
 // undismissed. Response shape confirmed against backend/src/routes/
 // alerts.routes.js: [{ id, userId, riskScore, reason, createdAt }] —
-// matches docs/api-contract.md exactly, no surprises there. (See chat
-// writeup for a routing issue found in that same file that means this
-// currently 404s regardless of shape.)
+// matches docs/api-contract.md exactly. The routing bug that made this
+// 404 (doubled '/admin' prefix) is fixed.
 function AlertsTab() {
   const [alerts, status] = useTabData(getAlerts);
-  const colSpan = 4;
+  const [pending, setPending] = useState({}); // id -> true while request is in flight
+  const [rowError, setRowError] = useState({}); // id -> error message
+  const [invalidated, setInvalidated] = useState({}); // id -> true once done
+  const colSpan = 5;
+
+  // Backend: POST /admin/alerts/:id/invalidate-session — :id is the
+  // login_events row (this alert), not a user id. Forces every token that
+  // user currently holds to stop working on their next request; there's no
+  // separate state to re-fetch afterward, so success just flips this row
+  // to a confirmed state rather than triggering a refetch of the list.
+  async function handleInvalidate(alertId) {
+    setPending((prev) => ({ ...prev, [alertId]: true }));
+    setRowError((prev) => ({ ...prev, [alertId]: null }));
+
+    try {
+      await invalidateSession(alertId);
+      setInvalidated((prev) => ({ ...prev, [alertId]: true }));
+    } catch (err) {
+      setRowError((prev) => ({
+        ...prev,
+        [alertId]: "Couldn't invalidate this session. Try again.",
+      }));
+    } finally {
+      setPending((prev) => ({ ...prev, [alertId]: false }));
+    }
+  }
 
   return (
     <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -271,6 +367,7 @@ function AlertsTab() {
           <th className="px-4 py-3 text-left font-medium text-slate-500">Reason</th>
           <th className="px-4 py-3 text-left font-medium text-slate-500">User</th>
           <th className="px-4 py-3 text-left font-medium text-slate-500">When</th>
+          <th className="px-4 py-3 text-right font-medium text-slate-500">Action</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100 bg-white">
@@ -284,19 +381,58 @@ function AlertsTab() {
         {status === 'ready' &&
           alerts.map((alert) => {
             const high = alert.riskScore > 50;
+            const route = parseImpossibleTravel(alert.reason);
+            const isImpossibleTravel = !!route;
+            const isPending = !!pending[alert.id];
+            const error = rowError[alert.id];
             return (
-              <tr key={alert.id} className="hover:bg-slate-50">
-                <td className="px-4 py-3">
+              <tr
+                key={alert.id}
+                className={`hover:bg-slate-50 ${isImpossibleTravel ? 'bg-rose-50/40' : ''}`}
+              >
+                <td
+                  className={`px-4 py-3 ${
+                    isImpossibleTravel ? 'border-l-4 border-rose-500' : ''
+                  }`}
+                >
                   <StatusPill tone={high ? 'red' : 'amber'}>
                     {alert.riskScore}
                   </StatusPill>
                 </td>
-                <td className="px-4 py-3 text-slate-700">{alert.reason}</td>
+                <td className="px-4 py-3 text-slate-700">
+                  {alert.reason}
+                  {isImpossibleTravel && (
+                    <div className="mt-1 flex items-center gap-1 text-xs font-semibold text-rose-700">
+                      <PlaneIcon className="h-3 w-3" />
+                      <span>
+                        {route.from} → {route.to}
+                      </span>
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-slate-500">
                   User #{alert.userId}
                 </td>
                 <td className="px-4 py-3 text-slate-500">
                   {formatDate(alert.createdAt)}
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <div className="flex flex-col items-end gap-1">
+                    {invalidated[alert.id] ? (
+                      <StatusPill tone="slate">Session invalidated</StatusPill>
+                    ) : (
+                      <button
+                        onClick={() => handleInvalidate(alert.id)}
+                        disabled={isPending}
+                        className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isPending ? 'Invalidating…' : 'Invalidate session'}
+                      </button>
+                    )}
+                    {error && (
+                      <span className="text-xs text-rose-500">{error}</span>
+                    )}
+                  </div>
                 </td>
               </tr>
             );
@@ -824,7 +960,28 @@ function AccessRequestsTab() {
   const [requests, status, refetch] = useTabData(getAccessRequests);
   const [pending, setPending] = useState({}); // id -> true while request is in flight
   const [rowError, setRowError] = useState({}); // id -> error message
-  const colSpan = 4;
+  const colSpan = 6;
+
+  // Backend: POST /admin/access-requests/:id/revoke — only acts on a
+  // currently-APPROVED request (409 otherwise), so the button below is
+  // gated on req.status === 'APPROVED' too rather than relying on the
+  // server's 409 alone to communicate that.
+  async function handleRevoke(requestId) {
+    setPending((prev) => ({ ...prev, [requestId]: true }));
+    setRowError((prev) => ({ ...prev, [requestId]: null }));
+
+    try {
+      await revokeRequest(requestId);
+      refetch();
+    } catch (err) {
+      setRowError((prev) => ({
+        ...prev,
+        [requestId]: "Couldn't revoke this request. Try again.",
+      }));
+    } finally {
+      setPending((prev) => ({ ...prev, [requestId]: false }));
+    }
+  }
 
   async function handleDecision(requestId, decision) {
     setPending((prev) => ({ ...prev, [requestId]: true }));
@@ -856,6 +1013,8 @@ function AccessRequestsTab() {
           <th className="px-4 py-3 text-left font-medium text-slate-500">Requester</th>
           <th className="px-4 py-3 text-left font-medium text-slate-500">Requested role</th>
           <th className="px-4 py-3 text-left font-medium text-slate-500">Requested at</th>
+          <th className="px-4 py-3 text-left font-medium text-slate-500">Stage</th>
+          <th className="px-4 py-3 text-left font-medium text-slate-500">Expires</th>
           <th className="px-4 py-3 text-right font-medium text-slate-500">Action</th>
         </tr>
       </thead>
@@ -882,23 +1041,59 @@ function AccessRequestsTab() {
                 <td className="px-4 py-3 text-slate-500">
                   {formatDate(req.requestedAt)}
                 </td>
+                <td className="px-4 py-3">
+                  <span
+                    className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                      req.status === 'PENDING_MANAGER'
+                        ? 'bg-amber-100 text-amber-700'
+                        : 'bg-sky-100 text-sky-700'
+                    }`}
+                  >
+                    {req.status === 'PENDING_MANAGER' ? 'Awaiting manager' : 'Awaiting admin'}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-slate-500">
+                  {req.expiresAt ? (
+                    <span title={formatDate(req.expiresAt)}>
+                      {formatExpiry(req.expiresAt)}
+                    </span>
+                  ) : req.durationHours ? (
+                    <span title="Requested duration — starts counting down once approved">
+                      Requested: {formatRequestedDuration(req.durationHours)}
+                    </span>
+                  ) : (
+                    <StatusPill tone="slate">Permanent</StatusPill>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-right">
                   <div className="flex flex-col items-end gap-1">
                     <div className="flex justify-end gap-2">
-                      <button
-                        onClick={() => handleDecision(req.id, 'approved')}
-                        disabled={isPending}
-                        className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {isPending ? 'Approving…' : 'Approve'}
-                      </button>
-                      <button
-                        onClick={() => handleDecision(req.id, 'denied')}
-                        disabled={isPending}
-                        className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {isPending ? 'Denying…' : 'Deny'}
-                      </button>
+                      {req.status === 'APPROVED' ? (
+                        <button
+                          onClick={() => handleRevoke(req.id)}
+                          disabled={isPending}
+                          className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isPending ? 'Revoking…' : 'Revoke early'}
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => handleDecision(req.id, 'approved')}
+                            disabled={isPending}
+                            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {isPending ? 'Approving…' : 'Approve'}
+                          </button>
+                          <button
+                            onClick={() => handleDecision(req.id, 'denied')}
+                            disabled={isPending}
+                            className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {isPending ? 'Denying…' : 'Deny'}
+                          </button>
+                        </>
+                      )}
                     </div>
                     {error && (
                       <span className="text-xs text-rose-500">{error}</span>
@@ -961,14 +1156,15 @@ function AuditLogTab() {
         )}
         {status === 'ready' &&
           logs.map((log) => {
-            const isDenied = log.action.toLowerCase().includes('denied');
+            const action = log.action.toLowerCase();
+            const isNegative = action.includes('denied') || action.includes('rejected');
             return (
               <tr key={log.id} className="hover:bg-slate-50">
                 <td className="px-4 py-3 font-medium text-slate-800">
                   {auditUserName(log)}
                 </td>
                 <td className="px-4 py-3">
-                  <StatusPill tone={isDenied ? 'red' : 'green'}>
+                  <StatusPill tone={isNegative ? 'red' : 'green'}>
                     {log.action}
                   </StatusPill>
                 </td>

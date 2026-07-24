@@ -43,7 +43,8 @@ router.get(
       // filtered, ordered, and paginated in the DB rather than pulling
       // everything back and slicing in JS.
       const { rows } = await pool.query(
-        `SELECT id, user_id, device_fingerprint, risk_score, created_at
+        `SELECT id, user_id, device_fingerprint, risk_score, created_at,
+                geo_lat, geo_lon, geo_city
          FROM login_events
          WHERE risk_score >= $1
          ORDER BY created_at DESC
@@ -60,6 +61,9 @@ router.get(
             userId: row.user_id,
             deviceFingerprint: row.device_fingerprint,
             createdAt: row.created_at,
+            geoLat: row.geo_lat,
+            geoLon: row.geo_lon,
+            geoCity: row.geo_city,
           });
 
           return {
@@ -83,6 +87,12 @@ router.get(
 // POST /admin/alerts/:id/invalidate-session
 // requireAuth + checkPermission('manage_users'), same as GET /admin/alerts.
 //
+// Mounted at /api/admin in index.js (same as GET /alerts above), so this
+// stays '/alerts/:id/invalidate-session' (not '/admin/alerts/:id/...') —
+// the old '/admin/alerts/:id/invalidate-session' here doubled up to
+// /api/admin/admin/alerts/:id/invalidate-session and 404'd every time,
+// same bug GET /alerts already had fixed.
+//
 // :id is the login_events row (the alert), not a user id — keeps the admin
 // UI able to act directly from a row in the alerts table without a second
 // lookup. Forces every token that user currently holds to stop working by
@@ -91,7 +101,7 @@ router.get(
 // delete from since auth is stateless JWTs, so "invalidate" here means
 // "reject going forward," not "delete a stored token."
 router.post(
-  '/admin/alerts/:id/invalidate-session',
+  '/alerts/:id/invalidate-session',
   requireAuth,
   checkPermission('manage_users'),
   async (req, res) => {
@@ -118,10 +128,15 @@ router.post(
 
       // Same pattern checkPermission uses: record the admin action so it
       // shows up in the audit log / feeds the rules engine.
+      //
+      // user_id is the actor (the admin who invalidated the session);
+      // target_user_id is the user whose session it was — see
+      // Request.routes.js's GET /admin/audit-logs, which shows
+      // target_user_id as the row's "user".
       await pool.query(
-        `INSERT INTO audit_logs (user_id, action, resource, ip_address)
-         VALUES ($1, $2, $3, $4)`,
-        [req.user.id, 'SESSION_INVALIDATED', `user:${targetUserId}`, req.ip]
+        `INSERT INTO audit_logs (user_id, target_user_id, action, resource, ip_address)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [req.user.id, targetUserId, 'SESSION_INVALIDATED', `user:${targetUserId}`, req.ip]
       );
 
       return res.json({
