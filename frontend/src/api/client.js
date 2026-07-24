@@ -176,16 +176,24 @@ export async function decideLeaveRequest(id, decision, comment) {
 
 // --- Tasks -------------------------------------------------------------
 
-// GET/POST /manager/tasks, PUT /tasks/:id/status, GET /tasks/me — the
-// `tasks` table is owned by Backend Dev 2 and isn't merged yet (see
+// GET/POST /tasks, PUT /tasks/:id/status, GET /tasks/me — the `tasks`
+// table is owned by Backend Dev 2 and isn't merged yet (see
 // manager.routes.js's GET /manager/overview, which already treats a
 // missing `tasks` table as "not ready" rather than failing). Written
 // against the shape described in the task and mirroring the leave-request
 // functions above, so this works unchanged once those routes land.
+//
+// NOTE: the manager-only actions below hit /tasks, not /manager/tasks —
+// task.routes.js is mounted at /api/tasks directly (see index.js), and
+// POST '/' / GET '/' already gate themselves to managers internally via
+// requireRole('manager'), same as the rest of that file. This originally
+// pointed at /manager/tasks by mistake (guessed from the leave/access
+// request URL pattern, which really does live under /manager), causing
+// every load here to 404.
 
 // Manager-only: assigns a task to someone on their team.
 export async function assignTask({ assignedTo, title, description, dueDate }) {
-  const { data } = await api.post('/manager/tasks', {
+  const { data } = await api.post('/tasks', {
     assignedTo,
     title,
     description,
@@ -196,7 +204,7 @@ export async function assignTask({ assignedTo, title, description, dueDate }) {
 
 // Manager-only: every task this manager has assigned, any status.
 export async function getManagerTasks() {
-  const { data } = await api.get('/manager/tasks');
+  const { data } = await api.get('/tasks');
   return data;
 }
 
