@@ -174,6 +174,46 @@ export async function decideLeaveRequest(id, decision, comment) {
   return data;
 }
 
+// --- Tasks -------------------------------------------------------------
+
+// GET/POST /manager/tasks, PUT /tasks/:id/status, GET /tasks/me — the
+// `tasks` table is owned by Backend Dev 2 and isn't merged yet (see
+// manager.routes.js's GET /manager/overview, which already treats a
+// missing `tasks` table as "not ready" rather than failing). Written
+// against the shape described in the task and mirroring the leave-request
+// functions above, so this works unchanged once those routes land.
+
+// Manager-only: assigns a task to someone on their team.
+export async function assignTask({ assignedTo, title, description, dueDate }) {
+  const { data } = await api.post('/manager/tasks', {
+    assignedTo,
+    title,
+    description,
+    dueDate,
+  });
+  return data;
+}
+
+// Manager-only: every task this manager has assigned, any status.
+export async function getManagerTasks() {
+  const { data } = await api.get('/manager/tasks');
+  return data;
+}
+
+// Any authenticated user: tasks assigned to them.
+export async function getMyTasks() {
+  const { data } = await api.get('/tasks/me');
+  return data;
+}
+
+// status: 'todo' | 'in_progress' | 'done'. Any authenticated user, for a
+// task assigned to them — this is the assignee moving their own task
+// forward, not a manager approval step (unlike access/leave requests).
+export async function updateTaskStatus(id, status) {
+  const { data } = await api.put(`/tasks/${id}/status`, { status });
+  return data;
+}
+
 // --- Finance dashboard ---------------------------------------------------
 
 export async function getBudgets() {
