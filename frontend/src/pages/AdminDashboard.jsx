@@ -39,6 +39,35 @@ async function deleteRole(id) {
   await api.delete(`/admin/roles/${id}`);
 }
 
+// --- CSV export (Frontend Dev 3) ------------------------------------------
+// Both export endpoints sit behind the same requireAuth as every other
+// /admin route, and requireAuth only reads the token from the Authorization
+// header (see backend/src/middleware/auth.js — no query-param fallback), so
+// a plain `window.location.href` download would hit these unauthenticated
+// and 401. Fetching as a blob through the shared `api` instance (its
+// request interceptor already attaches the Bearer token) and triggering the
+// save via a throwaway <a download> avoids that.
+function triggerCsvDownload(blob, filename) {
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+async function exportUsersCsv() {
+  const { data } = await api.get('/admin/users/export.csv', { responseType: 'blob' });
+  triggerCsvDownload(data, 'users.csv');
+}
+
+async function exportAuditLogCsv() {
+  const { data } = await api.get('/admin/audit-logs/export.csv', { responseType: 'blob' });
+  triggerCsvDownload(data, 'audit-log.csv');
+}
+
 // `confirm: true` on a retry after a 409 conflict skips the overlap check
 // server-side (see PUT /users/:id/roles in rbac.routes.js) and applies the
 // roles anyway. Verified working end-to-end as of Backend Dev 2's latest
@@ -124,15 +153,20 @@ function formatExpiry(expiresAt) {
 
 function StatusPill({ children, tone = 'slate' }) {
   const tones = {
-    slate: 'bg-slate-100 text-slate-700',
-    green: 'bg-emerald-100 text-emerald-700',
-    red: 'bg-rose-100 text-rose-700',
-    amber: 'bg-amber-100 text-amber-700',
+    slate: 'bg-slate-100 text-slate-600',
+    green: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200',
+    red: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200',
+    amber: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200',
+  };
+  const dots = {
+    slate: 'bg-slate-400',
+    green: 'bg-emerald-500',
+    red: 'bg-rose-500',
+    amber: 'bg-amber-500',
   };
   return (
-    <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tones[tone]}`}
-    >
+    <span className={`pill ${tones[tone]}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${dots[tone]}`} aria-hidden="true" />
       {children}
     </span>
   );
@@ -141,8 +175,11 @@ function StatusPill({ children, tone = 'slate' }) {
 function LoadingRow({ colSpan }) {
   return (
     <tr>
-      <td colSpan={colSpan} className="px-4 py-8 text-center text-sm text-slate-400">
-        Loading…
+      <td colSpan={colSpan} className="px-4 py-8">
+        <div className="mx-auto flex max-w-xs animate-pulse flex-col gap-2">
+          <div className="h-2.5 rounded-full bg-slate-200" />
+          <div className="h-2.5 w-2/3 rounded-full bg-slate-100" />
+        </div>
       </td>
     </tr>
   );
@@ -151,8 +188,8 @@ function LoadingRow({ colSpan }) {
 function ErrorRow({ colSpan, message }) {
   return (
     <tr>
-      <td colSpan={colSpan} className="px-4 py-8 text-center text-sm text-rose-500">
-        {message}
+      <td colSpan={colSpan} className="px-4 py-8 text-center text-sm font-medium text-rose-500">
+        ⚠ {message}
       </td>
     </tr>
   );
@@ -161,7 +198,7 @@ function ErrorRow({ colSpan, message }) {
 function EmptyRow({ colSpan, message }) {
   return (
     <tr>
-      <td colSpan={colSpan} className="px-4 py-8 text-center text-sm text-slate-400">
+      <td colSpan={colSpan} className="px-4 py-10 text-center text-sm text-slate-400">
         {message}
       </td>
     </tr>
@@ -361,13 +398,13 @@ function AlertsTab() {
 
   return (
     <table className="min-w-full divide-y divide-slate-200 text-sm">
-      <thead className="bg-slate-50">
+      <thead className="bg-slate-50/70">
         <tr>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Risk</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Reason</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">User</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">When</th>
-          <th className="px-4 py-3 text-right font-medium text-slate-500">Action</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Risk</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Reason</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">User</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">When</th>
+          <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Action</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100 bg-white">
@@ -457,7 +494,21 @@ function UsersTab() {
   const [editingUser, setEditingUser] = useState(null);
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(null);
   const colSpan = 4;
+
+  async function handleExport() {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await exportUsersCsv();
+    } catch (err) {
+      setExportError("Couldn't export users.");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   const q = query.trim().toLowerCase();
   const filteredUsers = users.filter((user) => {
@@ -494,15 +545,23 @@ function UsersTab() {
             </option>
           ))}
         </select>
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="btn-secondary btn-sm ml-auto"
+        >
+          {exporting ? 'Exporting…' : 'Export users'}
+        </button>
+        {exportError && <span className="text-xs text-rose-500">{exportError}</span>}
       </div>
 
       <table className="min-w-full divide-y divide-slate-200 text-sm">
-        <thead className="bg-slate-50">
+        <thead className="bg-slate-50/70">
           <tr>
-            <th className="px-4 py-3 text-left font-medium text-slate-500">Name</th>
-            <th className="px-4 py-3 text-left font-medium text-slate-500">Email</th>
-            <th className="px-4 py-3 text-left font-medium text-slate-500">Roles</th>
-            <th className="px-4 py-3 text-right font-medium text-slate-500">Action</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Name</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Email</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Roles</th>
+            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Action</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 bg-white">
@@ -525,7 +584,7 @@ function UsersTab() {
           )}
           {status === 'ready' &&
             filteredUsers.map((user) => (
-              <tr key={user.id} className="hover:bg-slate-50">
+              <tr key={user.id} className="transition-colors hover:bg-signal-50/60">
                 <td className="px-4 py-3 font-medium text-slate-800">{user.name}</td>
                 <td className="px-4 py-3 text-slate-500">{user.email}</td>
                 <td className="px-4 py-3">
@@ -661,7 +720,7 @@ function AssignRolesModal({ user, allRoles, onClose, onSaved }) {
               <button
                 onClick={() => submit()}
                 disabled={saving}
-                className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                className="btn-primary btn-sm"
               >
                 {saving ? 'Saving…' : 'Save roles'}
               </button>
@@ -700,7 +759,7 @@ function AssignRolesModal({ user, allRoles, onClose, onSaved }) {
               <button
                 onClick={() => submit({ confirm: true })}
                 disabled={saving}
-                className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="btn-warning"
               >
                 {saving ? 'Applying…' : 'Confirm and apply'}
               </button>
@@ -747,18 +806,18 @@ function RolesTab() {
         <button
           onClick={() => setEditingRole(null)}
           disabled={!formReady}
-          className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          className="btn-primary btn-sm"
         >
           New role
         </button>
       </div>
 
       <table className="min-w-full divide-y divide-slate-200 text-sm">
-        <thead className="bg-slate-50">
+        <thead className="bg-slate-50/70">
           <tr>
-            <th className="px-4 py-3 text-left font-medium text-slate-500">Role</th>
-            <th className="px-4 py-3 text-left font-medium text-slate-500">Description</th>
-            <th className="px-4 py-3 text-right font-medium text-slate-500">Actions</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Role</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Description</th>
+            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 bg-white">
@@ -771,7 +830,7 @@ function RolesTab() {
           )}
           {status === 'ready' &&
             roles.map((role) => (
-              <tr key={role.id} className="hover:bg-slate-50">
+              <tr key={role.id} className="transition-colors hover:bg-signal-50/60">
                 <td className="px-4 py-3 font-medium text-slate-800">{role.name}</td>
                 <td className="px-4 py-3 text-slate-500">{role.description}</td>
                 <td className="px-4 py-3 text-right">
@@ -787,7 +846,7 @@ function RolesTab() {
                       <button
                         onClick={() => handleDelete(role)}
                         disabled={deletingId === role.id}
-                        className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="btn-danger"
                       >
                         {deletingId === role.id ? 'Deleting…' : 'Delete'}
                       </button>
@@ -946,7 +1005,7 @@ function RoleFormModal({ role, permissions, onClose, onSaved }) {
           <button
             type="submit"
             disabled={saving}
-            className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            className="btn-primary btn-sm"
           >
             {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create role'}
           </button>
@@ -1008,14 +1067,14 @@ function AccessRequestsTab() {
 
   return (
     <table className="min-w-full divide-y divide-slate-200 text-sm">
-      <thead className="bg-slate-50">
+      <thead className="bg-slate-50/70">
         <tr>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Requester</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Requested role</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Requested at</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Stage</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Expires</th>
-          <th className="px-4 py-3 text-right font-medium text-slate-500">Action</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Requester</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Requested role</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Requested at</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Stage</th>
+          <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Expires</th>
+          <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Action</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100 bg-white">
@@ -1031,7 +1090,7 @@ function AccessRequestsTab() {
             const isPending = !!pending[req.id];
             const error = rowError[req.id];
             return (
-              <tr key={req.id} className="hover:bg-slate-50">
+              <tr key={req.id} className="transition-colors hover:bg-signal-50/60">
                 <td className="px-4 py-3 font-medium text-slate-800">
                   {req.user.name}
                 </td>
@@ -1043,12 +1102,18 @@ function AccessRequestsTab() {
                 </td>
                 <td className="px-4 py-3">
                   <span
-                    className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                    className={`pill ${
                       req.status === 'PENDING_MANAGER'
-                        ? 'bg-amber-100 text-amber-700'
-                        : 'bg-sky-100 text-sky-700'
+                        ? 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200'
+                        : 'bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-200'
                     }`}
                   >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        req.status === 'PENDING_MANAGER' ? 'bg-amber-500' : 'bg-sky-500'
+                      }`}
+                      aria-hidden="true"
+                    />
                     {req.status === 'PENDING_MANAGER' ? 'Awaiting manager' : 'Awaiting admin'}
                   </span>
                 </td>
@@ -1081,14 +1146,14 @@ function AccessRequestsTab() {
                           <button
                             onClick={() => handleDecision(req.id, 'approved')}
                             disabled={isPending}
-                            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="btn-success"
                           >
                             {isPending ? 'Approving…' : 'Approve'}
                           </button>
                           <button
                             onClick={() => handleDecision(req.id, 'denied')}
                             disabled={isPending}
-                            className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="btn-danger"
                           >
                             {isPending ? 'Denying…' : 'Deny'}
                           </button>
@@ -1133,53 +1198,79 @@ function auditCreatedAt(log) {
 
 function AuditLogTab() {
   const [logs, status] = useTabData(getAuditLogs);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(null);
   const colSpan = 4;
 
+  async function handleExport() {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await exportAuditLogCsv();
+    } catch (err) {
+      setExportError("Couldn't export audit log.");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
-    <table className="min-w-full divide-y divide-slate-200 text-sm">
-      <thead className="bg-slate-50">
-        <tr>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">User</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Action</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">Resource</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">IP address</th>
-          <th className="px-4 py-3 text-left font-medium text-slate-500">When</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-slate-100 bg-white">
-        {status === 'loading' && <LoadingRow colSpan={colSpan} />}
-        {status === 'error' && (
-          <ErrorRow colSpan={colSpan} message="Couldn't load audit logs." />
-        )}
-        {status === 'ready' && logs.length === 0 && (
-          <EmptyRow colSpan={colSpan} message="No audit log entries yet." />
-        )}
-        {status === 'ready' &&
-          logs.map((log) => {
-            const action = log.action.toLowerCase();
-            const isNegative = action.includes('denied') || action.includes('rejected');
-            return (
-              <tr key={log.id} className="hover:bg-slate-50">
-                <td className="px-4 py-3 font-medium text-slate-800">
-                  {auditUserName(log)}
-                </td>
-                <td className="px-4 py-3">
-                  <StatusPill tone={isNegative ? 'red' : 'green'}>
-                    {log.action}
-                  </StatusPill>
-                </td>
-                <td className="px-4 py-3 text-slate-500">{log.resource}</td>
-                <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                  {auditIp(log)}
-                </td>
-                <td className="px-4 py-3 text-slate-500">
-                  {formatDate(auditCreatedAt(log))}
-                </td>
-              </tr>
-            );
-          })}
-      </tbody>
-    </table>
+    <>
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="btn-secondary btn-sm ml-auto"
+        >
+          {exporting ? 'Exporting…' : 'Export audit log'}
+        </button>
+        {exportError && <span className="text-xs text-rose-500">{exportError}</span>}
+      </div>
+      <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <thead className="bg-slate-50/70">
+          <tr>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">User</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Action</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Resource</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">IP address</th>
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">When</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 bg-white">
+          {status === 'loading' && <LoadingRow colSpan={colSpan} />}
+          {status === 'error' && (
+            <ErrorRow colSpan={colSpan} message="Couldn't load audit logs." />
+          )}
+          {status === 'ready' && logs.length === 0 && (
+            <EmptyRow colSpan={colSpan} message="No audit log entries yet." />
+          )}
+          {status === 'ready' &&
+            logs.map((log) => {
+              const action = log.action.toLowerCase();
+              const isNegative = action.includes('denied') || action.includes('rejected');
+              return (
+                <tr key={log.id} className="transition-colors hover:bg-signal-50/60">
+                  <td className="px-4 py-3 font-medium text-slate-800">
+                    {auditUserName(log)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <StatusPill tone={isNegative ? 'red' : 'green'}>
+                      {log.action}
+                    </StatusPill>
+                  </td>
+                  <td className="px-4 py-3 text-slate-500">{log.resource}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-500">
+                    {auditIp(log)}
+                  </td>
+                  <td className="px-4 py-3 text-slate-500">
+                    {formatDate(auditCreatedAt(log))}
+                  </td>
+                </tr>
+              );
+            })}
+        </tbody>
+      </table>
+    </>
   );
 }
 
@@ -1189,7 +1280,7 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('users');
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-slate-50/60">
       <Header />
       <AlertBanner />
 
