@@ -10,6 +10,7 @@ import alertsRoutes from './routes/alerts.routes.js';
 import accessRequestsMeRoutes from './routes/accessRequestsMe.routes.js';
 import managerRoutes from './routes/manager.routes.js';
 import leaveRoutes from './routes/leave.routes.js';
+import taskRoutes from './routes/task.routes.js';
 import hrRoutes from './routes/hr.routes.js';
 import financeRoutes from './routes/finance.routes.js';
 
@@ -64,6 +65,10 @@ app.use('/api', leaveRoutes);
 // Manager dashboard — GET /api/manager/team, GET /api/manager/access-requests,
 // PUT /api/manager/access-requests/:id. See routes/manager.routes.js.
 app.use('/api/manager', managerRoutes);
+
+// Task management — POST /api/tasks, GET /api/tasks, GET /api/tasks/me,
+// PUT /api/tasks/:id/status. See routes/task.routes.js.
+app.use('/api/tasks', taskRoutes);
 
 // HR / Finance dashboards — Backend Dev 3. GET/POST /api/hr/employees,
 // PUT /api/hr/employees/:id/status (hr.routes.js); GET /api/finance/budgets,
