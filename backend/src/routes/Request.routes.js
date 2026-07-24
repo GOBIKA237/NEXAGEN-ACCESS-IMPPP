@@ -468,4 +468,120 @@ router.get(
   }
 );
 
+// Quote a value for CSV per RFC 4180: wrap in quotes and escape internal
+// quotes whenever the field contains a comma, quote, or newline. null/
+// undefined become an empty field rather than the literal string "null".
+function toCsvField(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+// GET /admin/audit-log/export.csv?userId=
+// requireAuth + checkPermission('view_audit_log')
+//
+// Same query and actor/target shaping as GET /admin/audit-logs above, just
+// reformatted as a CSV download instead of JSON. This is an export, not a
+// paginated view, so — unlike the JSON route — it isn't limited to a page
+// at a time; it streams every row matching the optional userId filter.
+router.get(
+  '/admin/audit-log/export.csv',
+  requireAuth,
+  checkPermission('view_audit_log'),
+  async (req, res) => {
+    const { userId } = req.query;
+
+    try {
+      const params = [];
+      let where = '';
+      if (userId) {
+        params.push(userId);
+        where = `WHERE al.user_id = $${params.length}`;
+      }
+
+      const result = await pool.query(
+        `SELECT al.id, al.action, al.resource, al.ip_address, al.device_info, al.created_at,
+                actor.id AS actor_id, actor.name AS actor_name, actor.email AS actor_email,
+                target.id AS target_id, target.name AS target_name, target.email AS target_email
+         FROM audit_logs al
+         LEFT JOIN users actor  ON actor.id  = al.user_id
+         LEFT JOIN users target ON target.id = al.target_user_id
+         ${where}
+         ORDER BY al.created_at DESC`,
+        params
+      );
+
+      // Same "user" fallback rule as the JSON route: target when there is
+      // one, otherwise the actor (self-actions like ACCESS_GRANTED).
+      const rows = result.rows.map((row) => {
+        const user = row.target_id
+          ? { name: row.target_name, email: row.target_email }
+          : row.actor_id
+          ? { name: row.actor_name, email: row.actor_email }
+          : null;
+        const performedBy = row.actor_id
+          ? { name: row.actor_name, email: row.actor_email }
+          : null;
+
+        return [
+          row.id,
+          user?.name ?? '',
+          user?.email ?? '',
+          performedBy?.name ?? '',
+          performedBy?.email ?? '',
+          row.action,
+          row.resource,
+          row.ip_address,
+          row.device_info,
+          row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+        ];
+      });
+
+      const header = [
+        'id',
+        'user_name',
+        'user_email',
+        'performed_by_name',
+        'performed_by_email',
+        'action',
+        'resource',
+        'ip_address',
+        'device_info',
+        'created_at',
+      ];
+
+      const csv = [header, ...rows]
+        .map((line) => line.map(toCsvField).join(','))
+        .join('\r\n');
+
+      // Exporting the audit log is itself bulk data extraction, same as
+      // any other export — so it gets its own trail, same actor-only
+      // shape as ACCESS_GRANTED/ACCESS_DENIED above (no separate target).
+      await pool.query(
+        `INSERT INTO audit_logs (user_id, action, resource, ip_address)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          req.user.id,
+          'AUDIT_LOG_EXPORTED',
+          userId ? `audit_log_export?userId=${userId}` : 'audit_log_export',
+          req.ip,
+        ]
+      );
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="audit-log-${new Date().toISOString().slice(0, 10)}.csv"`
+      );
+      return res.send(csv);
+    } catch (err) {
+      console.error('Error exporting audit log:', err);
+      return res.status(500).json({ error: 'Failed to export audit log' });
+    }
+  }
+);
+
 export default router;
