@@ -22,11 +22,18 @@ import {
   getManagerAccessRequests,
   reviewManagerRequest,
   getManagerOverview,
+  getManagerLeaveRequests,
+  decideLeaveRequest,
 } from '../api/client.js';
 
 const REQUIRED_ROLE = 'manager';
 
 // --- Small shared helpers (same look as Finance/HR/Admin dashboards) ------
+
+function formatDateOnly(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
+}
 
 function formatDate(iso) {
   if (!iso) return '—';
@@ -328,12 +335,166 @@ function ApprovalHistory({ requests, status }) {
   );
 }
 
+// --- Leave Requests (pending manager decision) ------------------------
+
+function LeaveRequestsReview({ requests, status, onDecided }) {
+  const [pendingId, setPendingId] = useState(null);
+  const [comment, setComment] = useState({}); // id -> comment text
+  const [rowError, setRowError] = useState({});
+  const colSpan = 5;
+
+  const pending = (requests ?? []).filter((r) => r.status === 'PENDING');
+
+  async function decide(req, decision) {
+    setPendingId(req.id);
+    setRowError((prev) => ({ ...prev, [req.id]: null }));
+    try {
+      await decideLeaveRequest(req.id, decision, comment[req.id] ?? '');
+      onDecided();
+    } catch (err) {
+      setRowError((prev) => ({
+        ...prev,
+        [req.id]: `Couldn't ${decision === 'approved' ? 'approve' : 'reject'} this request.`,
+      }));
+    } finally {
+      setPendingId(null);
+    }
+  }
+
+  return (
+    <SectionCard
+      title="Leave Requests"
+      subtitle="Leave requests from your team waiting on your decision."
+    >
+      <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Requester</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Dates</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Reason</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Comment</th>
+            <th className="px-4 py-3 text-right font-medium text-slate-500">Decision</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 bg-white">
+          {status === 'loading' && <LoadingRow colSpan={colSpan} />}
+          {status === 'error' && (
+            <ErrorRow colSpan={colSpan} message="Couldn't load leave requests." />
+          )}
+          {status === 'ready' && pending.length === 0 && (
+            <EmptyRow colSpan={colSpan} message="Nothing waiting on you right now." />
+          )}
+          {status === 'ready' &&
+            pending.map((req) => {
+              const isBusy = pendingId === req.id;
+              return (
+                <tr key={req.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-3 font-medium text-slate-800">{req.user?.name}</td>
+                  <td className="px-4 py-3 text-slate-500">
+                    {formatDateOnly(req.startDate)} – {formatDateOnly(req.endDate)}
+                  </td>
+                  <td className="px-4 py-3 text-slate-500">{req.reason || '—'}</td>
+                  <td className="px-4 py-3">
+                    <input
+                      type="text"
+                      placeholder="Optional comment"
+                      value={comment[req.id] ?? ''}
+                      onChange={(e) =>
+                        setComment((prev) => ({ ...prev, [req.id]: e.target.value }))
+                      }
+                      className="w-40 rounded-md border border-slate-300 px-2 py-1 text-xs"
+                    />
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex flex-col items-end gap-1">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          onClick={() => decide(req, 'approved')}
+                          disabled={isBusy}
+                          className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isBusy ? 'Working…' : 'Approve'}
+                        </button>
+                        <button
+                          onClick={() => decide(req, 'rejected')}
+                          disabled={isBusy}
+                          className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isBusy ? 'Working…' : 'Reject'}
+                        </button>
+                      </div>
+                      {rowError[req.id] && (
+                        <span className="text-xs text-rose-500">{rowError[req.id]}</span>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+        </tbody>
+      </table>
+    </SectionCard>
+  );
+}
+
+// --- Leave History (already decided by this manager) -------------------
+
+function LeaveHistory({ requests, status }) {
+  const colSpan = 4;
+  const decided = (requests ?? []).filter((r) => r.status !== 'PENDING');
+
+  return (
+    <SectionCard title="Leave History" subtitle="Leave requests you've already decided on.">
+      <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Requester</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Dates</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Your decision</th>
+            <th className="px-4 py-3 text-left font-medium text-slate-500">Comment</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 bg-white">
+          {status === 'loading' && <LoadingRow colSpan={colSpan} />}
+          {status === 'error' && (
+            <ErrorRow colSpan={colSpan} message="Couldn't load leave history." />
+          )}
+          {status === 'ready' && decided.length === 0 && (
+            <EmptyRow colSpan={colSpan} message="No decisions yet." />
+          )}
+          {status === 'ready' &&
+            decided.map((req) => {
+              const rejected = req.status === 'REJECTED';
+              return (
+                <tr key={req.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-3 font-medium text-slate-800">{req.user?.name}</td>
+                  <td className="px-4 py-3 text-slate-500">
+                    {formatDateOnly(req.startDate)} – {formatDateOnly(req.endDate)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <StatusPill tone={rejected ? 'red' : 'green'}>
+                      {rejected ? 'Rejected' : 'Approved'}
+                    </StatusPill>
+                  </td>
+                  <td className="px-4 py-3 text-slate-500">{req.managerComment || '—'}</td>
+                </tr>
+              );
+            })}
+        </tbody>
+      </table>
+    </SectionCard>
+  );
+}
+
 // --- Body ---------------------------------------------------------------
 
 function ManagerDashboardBody() {
   const [team, teamStatus] = useAsync(getMyTeam);
   const [requests, requestsStatus, refetchRequests] = useAsync(getManagerAccessRequests);
   const [overview, overviewStatus] = useAsync(getManagerOverview);
+  const [leaveRequests, leaveRequestsStatus, refetchLeaveRequests] = useAsync(
+    getManagerLeaveRequests
+  );
 
   return (
     <div className="space-y-6">
@@ -363,6 +524,12 @@ function ManagerDashboardBody() {
         onDecided={refetchRequests}
       />
       <ApprovalHistory requests={requests} status={requestsStatus} />
+      <LeaveRequestsReview
+        requests={leaveRequests}
+        status={leaveRequestsStatus}
+        onDecided={refetchLeaveRequests}
+      />
+      <LeaveHistory requests={leaveRequests} status={leaveRequestsStatus} />
     </div>
   );
 }
