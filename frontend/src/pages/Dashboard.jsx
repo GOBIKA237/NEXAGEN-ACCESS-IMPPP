@@ -1,6 +1,13 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { requestAccess, getAvailableRoles, getMe, getMyAccessRequests } from '../api/client.js';
+import {
+  requestAccess,
+  getAvailableRoles,
+  getMe,
+  getMyAccessRequests,
+  submitLeaveRequest,
+  getMyLeaveRequests,
+} from '../api/client.js';
 import Header from '../components/Header.jsx';
 
 // Static registry of dashboard features. Add new cards here as the product
@@ -80,6 +87,24 @@ const STATUS_LABELS = {
 
 function statusInfo(status) {
   return STATUS_LABELS[status] ?? { label: status, tone: 'slate' };
+}
+
+// Leave requests are a simpler two-party flow than access requests — no
+// admin second stage, PENDING -> APPROVED/REJECTED is terminal either way
+// (see migration 007_add_leave_requests.sql).
+const LEAVE_STATUS_LABELS = {
+  PENDING: { label: 'Pending manager review', tone: 'amber' },
+  APPROVED: { label: 'Approved', tone: 'green' },
+  REJECTED: { label: 'Rejected', tone: 'red' },
+};
+
+function leaveStatusInfo(status) {
+  return LEAVE_STATUS_LABELS[status] ?? { label: status, tone: 'slate' };
+}
+
+function formatDateOnly(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 }
 
 const STATUS_PILL_TONES = {
@@ -446,6 +471,119 @@ function RequestAccessModal({ roles, rolesStatus, onClose, onSubmit, submitting 
   );
 }
 
+function RequestLeaveModal({ onClose, onSubmit, submitting }) {
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+
+    if (!startDate || !endDate) {
+      setError('Start and end date are both required.');
+      return;
+    }
+    if (endDate < startDate) {
+      setError('End date must be on or after the start date.');
+      return;
+    }
+
+    setError('');
+    onSubmit({ startDate, endDate, reason: reason.trim() || null });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-800">Request Leave</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+            aria-label="Close"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
+              <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          {error && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="startDate" className="block text-sm font-medium text-slate-700">
+                Start date
+              </label>
+              <input
+                id="startDate"
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+              />
+            </div>
+            <div>
+              <label htmlFor="endDate" className="block text-sm font-medium text-slate-700">
+                End date
+              </label>
+              <input
+                id="endDate"
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="reason" className="block text-sm font-medium text-slate-700">
+              Reason (optional)
+            </label>
+            <textarea
+              id="reason"
+              rows={3}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Family vacation"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {submitting ? 'Submitting…' : 'Submit Request'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [user, setUser] = useState(null);
   const [checkedStorage, setCheckedStorage] = useState(false);
@@ -457,6 +595,10 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [myRequests, setMyRequests] = useState([]);
   const [myRequestsStatus, setMyRequestsStatus] = useState('idle'); // idle | loading | ready | error
+  const [leaveModalOpen, setLeaveModalOpen] = useState(false);
+  const [leaveSubmitting, setLeaveSubmitting] = useState(false);
+  const [myLeaveRequests, setMyLeaveRequests] = useState([]);
+  const [myLeaveRequestsStatus, setMyLeaveRequestsStatus] = useState('idle'); // idle | loading | ready | error
 
   // Pulls the latest roles/permissions from the server and writes them
   // back into sessionStorage + state. Called on mount and from the manual
@@ -558,6 +700,32 @@ export default function Dashboard() {
     };
   }, [checkedStorage]);
 
+  // Loads the current user's own leave requests for the "My Leave Requests"
+  // list. Separate effect from access requests above, same reasoning: a
+  // failure here shouldn't block the rest of the page.
+  useEffect(() => {
+    if (!checkedStorage) return;
+
+    let cancelled = false;
+    setMyLeaveRequestsStatus('loading');
+
+    getMyLeaveRequests()
+      .then((data) => {
+        if (cancelled) return;
+        setMyLeaveRequests(data);
+        setMyLeaveRequestsStatus('ready');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('Failed to load my leave requests:', err);
+        setMyLeaveRequestsStatus('error');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [checkedStorage]);
+
   const openRequestModal = async () => {
     setModalOpen(true);
     setRolesStatus('loading');
@@ -591,6 +759,38 @@ export default function Dashboard() {
       setToast({ type: 'error', message });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleLeaveSubmit = async ({ startDate, endDate, reason }) => {
+    setLeaveSubmitting(true);
+
+    try {
+      await submitLeaveRequest({ startDate, endDate, reason });
+      setLeaveModalOpen(false);
+      setToast({
+        type: 'success',
+        message: 'Leave request submitted — your manager will review it.',
+      });
+      // Refresh the list so the new request shows up immediately.
+      setMyLeaveRequestsStatus('loading');
+      getMyLeaveRequests()
+        .then((data) => {
+          setMyLeaveRequests(data);
+          setMyLeaveRequestsStatus('ready');
+        })
+        .catch((err) => {
+          console.error('Failed to reload my leave requests:', err);
+          setMyLeaveRequestsStatus('error');
+        });
+    } catch (err) {
+      console.error('Failed to submit leave request:', err);
+      const message =
+        err.response?.data?.error ||
+        'Could not submit your leave request. Please try again.';
+      setToast({ type: 'error', message });
+    } finally {
+      setLeaveSubmitting(false);
     }
   };
 
@@ -631,6 +831,13 @@ export default function Dashboard() {
               className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-900"
             >
               Request Access
+            </button>
+            <button
+              type="button"
+              onClick={() => setLeaveModalOpen(true)}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+            >
+              Request Leave
             </button>
           </div>
         </div>
@@ -696,6 +903,67 @@ export default function Dashboard() {
                 </span>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* My Leave Requests — wired up against GET /leave-requests/me. */}
+        <div className="mt-8 rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex items-center justify-between p-5 pb-0">
+            <h2 className="font-semibold text-slate-800">My Leave Requests</h2>
+          </div>
+
+          <div className="mt-4 overflow-x-auto">
+            {myLeaveRequestsStatus === 'loading' && (
+              <p className="px-5 pb-5 text-sm text-slate-400">Loading your leave requests…</p>
+            )}
+
+            {myLeaveRequestsStatus === 'error' && (
+              <p className="px-5 pb-5 text-sm text-rose-500">
+                Couldn't load your leave requests. Please try again later.
+              </p>
+            )}
+
+            {myLeaveRequestsStatus === 'ready' && myLeaveRequests.length === 0 && (
+              <p className="px-5 pb-5 text-sm text-slate-400">
+                You haven't requested any leave yet.
+              </p>
+            )}
+
+            {myLeaveRequestsStatus === 'ready' && myLeaveRequests.length > 0 && (
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Dates</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Reason</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Requested</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Status</th>
+                    <th className="px-5 py-3 text-left font-medium text-slate-500">Manager comment</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {myLeaveRequests.map((req) => {
+                    const { label, tone } = leaveStatusInfo(req.status);
+                    return (
+                      <tr key={req.id}>
+                        <td className="px-5 py-3 font-medium text-slate-800">
+                          {formatDateOnly(req.startDate)} – {formatDateOnly(req.endDate)}
+                        </td>
+                        <td className="px-5 py-3 text-slate-600">{req.reason || '—'}</td>
+                        <td className="px-5 py-3 text-slate-500">{formatDate(req.requestedAt)}</td>
+                        <td className="px-5 py-3">
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_PILL_TONES[tone]}`}
+                          >
+                            {label}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-slate-500">{req.managerComment || '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
 
@@ -775,6 +1043,14 @@ export default function Dashboard() {
           onClose={() => setModalOpen(false)}
           onSubmit={handleRequestSubmit}
           submitting={submitting}
+        />
+      )}
+
+      {leaveModalOpen && (
+        <RequestLeaveModal
+          onClose={() => setLeaveModalOpen(false)}
+          onSubmit={handleLeaveSubmit}
+          submitting={leaveSubmitting}
         />
       )}
 
