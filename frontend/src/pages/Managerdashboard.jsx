@@ -21,6 +21,7 @@ import {
   getMyTeam,
   getManagerAccessRequests,
   reviewManagerRequest,
+  getManagerOverview,
 } from '../api/client.js';
 
 const REQUIRED_ROLE = 'manager';
@@ -121,6 +122,14 @@ function SectionCard({ title, subtitle, children, action }) {
       {children}
     </div>
   );
+}
+
+// GET /manager/overview reports a stat as null (rather than 0) when its
+// backing table isn't merged yet (see manager.routes.js) — show that as
+// "—" the same way the loading/error states already do, instead of a
+// misleading 0.
+function formatStat(value) {
+  return value === null || value === undefined ? '—' : value;
 }
 
 function StatBlock({ label, value }) {
@@ -324,18 +333,27 @@ function ApprovalHistory({ requests, status }) {
 function ManagerDashboardBody() {
   const [team, teamStatus] = useAsync(getMyTeam);
   const [requests, requestsStatus, refetchRequests] = useAsync(getManagerAccessRequests);
-
-  const pendingCount = (requests ?? []).filter((r) => r.status === 'PENDING_MANAGER').length;
-  const approvedCount = (requests ?? []).filter((r) => r.status !== 'PENDING_MANAGER' && r.status !== 'REJECTED').length;
-  const rejectedCount = (requests ?? []).filter((r) => r.status === 'REJECTED').length;
+  const [overview, overviewStatus] = useAsync(getManagerOverview);
 
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatBlock label="Team Members" value={teamStatus === 'ready' ? (team ?? []).length : '—'} />
-        <StatBlock label="Pending Requests" value={requestsStatus === 'ready' ? pendingCount : '—'} />
-        <StatBlock label="Approved by You" value={requestsStatus === 'ready' ? approvedCount : '—'} />
-        <StatBlock label="Rejected by You" value={requestsStatus === 'ready' ? rejectedCount : '—'} />
+        <StatBlock
+          label="Total Employees"
+          value={overviewStatus === 'ready' ? formatStat(overview?.totalEmployees) : '—'}
+        />
+        <StatBlock
+          label="Present Today"
+          value={overviewStatus === 'ready' ? formatStat(overview?.presentToday) : '—'}
+        />
+        <StatBlock
+          label="On Leave"
+          value={overviewStatus === 'ready' ? formatStat(overview?.onLeaveToday) : '—'}
+        />
+        <StatBlock
+          label="Pending Tasks"
+          value={overviewStatus === 'ready' ? formatStat(overview?.pendingTasks) : '—'}
+        />
       </div>
 
       <MyTeam team={team} status={teamStatus} />
