@@ -54,18 +54,22 @@ const FEATURES = [
     role: 'hr',
   },
   {
-    key: 'manage_users',
-    title: 'User Management',
-    description: 'Create, edit, and manage user roles.',
-    accent: 'bg-violet-500',
-    role: 'admin',
-  },
-  {
-    key: 'view_audit_log',
-    title: 'Audit Log',
-    description: 'Review permission checks and admin actions.',
-    accent: 'bg-amber-500',
-    role: 'admin',
+    key: 'manager_dashboard', // synthetic — not a real permissions.* entry,
+    // see roleGate below. 'manager' is gated by role membership
+    // (requireRole('manager') in checkPermission.js), not a permission in
+    // role_permissions, so this card can't be unlocked the same way as the
+    // others above (checking user.permissions.includes(key)). roleGate
+    // tells the render loop below to check user.roles instead.
+    //
+    // User Management and Audit Log used to be cards here, but both are
+    // admin-only (role: 'admin') and admins already land straight on
+    // /admin on login (see Login.jsx) — there's no reason to surface them
+    // as locked/"Restricted" cards to every other role too.
+    title: 'Manager Dashboard',
+    description: 'Team overview, access approvals, and leave/task management.',
+    accent: 'bg-rose-500',
+    path: '/dashboard/manager',
+    roleGate: 'manager',
   },
 ];
 
@@ -920,9 +924,13 @@ export default function Dashboard() {
               title={feature.title}
               description={feature.description}
               accent={feature.accent}
-              enabled={user.permissions.includes(feature.key)}
+              enabled={
+                feature.roleGate
+                  ? user.roles.includes(feature.roleGate)
+                  : user.permissions.includes(feature.key)
+              }
               path={feature.path}
-              expiresAt={user.roleExpirations?.[feature.role]}
+              expiresAt={user.roleExpirations?.[feature.roleGate ?? feature.role]}
             />
           ))}
         </div>
