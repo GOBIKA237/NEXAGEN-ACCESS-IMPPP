@@ -159,6 +159,123 @@ router.put('/access-requests/:id', requireAuth, requireRole('manager'), async (r
   }
 });
 
+// GET /manager/leave-requests
+// Response: [{ id, user: {...}, startDate, endDate, reason, status,
+//              managerComment, decidedAt, requestedAt }]
+// Every leave request assigned to this manager at all stages — same shape
+// as GET /manager/access-requests above: Managerdashboard.jsx's
+// LeaveRequestsReview filters status === 'PENDING', LeaveHistory filters
+// status !== 'PENDING' from this same array.
+router.get('/leave-requests', requireAuth, requireRole('manager'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         lr.id,
+         lr.status,
+         lr.start_date,
+         lr.end_date,
+         lr.reason,
+         lr.manager_comment,
+         lr.decided_at,
+         lr.requested_at,
+         u.id    AS user_id,
+         u.email AS user_email,
+         u.name  AS user_name
+       FROM leave_requests lr
+       JOIN users u ON u.id = lr.user_id
+       WHERE lr.manager_id = $1
+       ORDER BY lr.requested_at DESC`,
+      [req.user.id]
+    );
+
+    const shaped = rows.map((row) => ({
+      id: row.id,
+      user: { id: row.user_id, name: row.user_name, email: row.user_email },
+      startDate: row.start_date,
+      endDate: row.end_date,
+      reason: row.reason,
+      status: row.status,
+      managerComment: row.manager_comment,
+      decidedAt: row.decided_at,
+      requestedAt: row.requested_at,
+    }));
+
+    res.json(shaped);
+  } catch (err) {
+    console.error('Error fetching manager leave requests:', err);
+    res.status(500).json({ error: 'Failed to fetch leave requests' });
+  }
+});
+
+// PUT /manager/leave-requests/:id
+// Body: { decision: 'approved' | 'rejected', comment }
+// PENDING -> APPROVED / REJECTED is terminal either way — no second
+// (admin) stage, unlike access_requests. Same ownership/status-guard
+// pattern as PUT /manager/access-requests/:id above.
+router.put('/leave-requests/:id', requireAuth, requireRole('manager'), async (req, res) => {
+  const { id } = req.params;
+  const { decision, comment } = req.body;
+
+  if (!['approved', 'rejected'].includes(decision)) {
+    return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
+  }
+
+  try {
+    const { rows: existingRows } = await pool.query(
+      'SELECT id, manager_id, status, user_id FROM leave_requests WHERE id = $1',
+      [id]
+    );
+
+    if (existingRows.length === 0) {
+      return res.status(404).json({ error: 'Leave request not found' });
+    }
+
+    const existing = existingRows[0];
+
+    if (Number(existing.manager_id) !== Number(req.user.id)) {
+      return res.status(403).json({ error: "This request isn't assigned to you" });
+    }
+
+    if (existing.status !== 'PENDING') {
+      return res.status(409).json({ error: 'This request has already been decided' });
+    }
+
+    const newStatus = decision === 'approved' ? 'APPROVED' : 'REJECTED';
+
+    const { rows } = await pool.query(
+      `UPDATE leave_requests
+       SET status = $1, decided_at = NOW(), manager_comment = $2
+       WHERE id = $3
+       RETURNING id, status, decided_at, manager_comment`,
+      [newStatus, comment ?? null, id]
+    );
+
+    // user_id is the actor (this manager); target_user_id is the employee
+    // whose leave was decided — same convention as MANAGER_APPROVED_REQUEST.
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, target_user_id, action, resource, ip_address)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.user.id,
+        existing.user_id,
+        decision === 'approved' ? 'MANAGER_APPROVED_LEAVE' : 'MANAGER_REJECTED_LEAVE',
+        `leave_request:${id}`,
+        req.ip,
+      ]
+    );
+
+    res.json({
+      id: rows[0].id,
+      status: rows[0].status,
+      decidedAt: rows[0].decided_at,
+      managerComment: rows[0].manager_comment,
+    });
+  } catch (err) {
+    console.error('Error reviewing leave request:', err);
+    res.status(500).json({ error: 'Failed to review leave request' });
+  }
+});
+
 // GET /manager/overview
 // Response: { totalEmployees, presentToday, onLeaveToday, pendingTasks }
 //
